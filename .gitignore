@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.env
+.venv/
+env/
+venv/
+ENV/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Local tracking state (optional if you want clean git)
+# cookies.json
+# devices.json

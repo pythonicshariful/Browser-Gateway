@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HS Economics - Admin Panel</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="background-glow"></div>
+
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="logo-group">
+                <div class="logo-icon">
+                    <span>🛡️</span>
+                </div>
+                <div>
+                    <h1>HS Economics Admin Panel</h1>
+                    <p class="subtitle">Device Firewall, Access Control & Session Manager</p>
+                </div>
+            </div>
+            <div class="header-badges">
+                <a href="/" target="_blank" class="badge" style="color: #60a5fa; text-decoration: none;">
+                    🌐 View Web Version ↗
+                </a>
+                <a href="/admin/logout" class="badge" style="color: #ef4444; text-decoration: none; border-color: rgba(239,68,68,0.3);">
+                    🚪 Admin Logout
+                </a>
+            </div>
+        </header>
+
+        <!-- Tab Navigation -->
+        <div class="tab-nav">
+            <button class="tab-btn active" onclick="switchTab('devicesTab', this)">
+                <span>📱 Devices & Firewall</span>
+                <span id="deviceCountBadge" class="tab-count">{{ device_data.devices|length }}</span>
+            </button>
+            <button class="tab-btn" onclick="switchTab('sessionsTab', this)">
+                <span>🔑 Session Cookies & Gateway</span>
+            </button>
+        </div>
+
+        <!-- Tab 1: Devices & IP Access Control -->
+        <div id="devicesTab" class="tab-content active">
+            <div class="card">
+                <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <h2>Connected Devices</h2>
+                        <span class="card-desc">Track all visitors, assign custom device names, and block/unblock devices or IPs</span>
+                    </div>
+                    <button onclick="loadDevices()" class="btn btn-outline btn-xs">
+                        🔄 Refresh List
+                    </button>
+                </div>
+
+                <!-- Devices List Container -->
+                <div id="deviceListContainer" class="device-card-list">
+                    <p class="text-muted" style="text-align: center; padding: 20px;">Loading devices...</p>
+                </div>
+
+                <!-- Manual IP Blocker Section -->
+                <div class="ip-firewall-box">
+                    <h3 style="font-size: 15px; margin-bottom: 6px;">🚫 Block Specific IP Address</h3>
+                    <p class="card-desc">Block an IP from accessing the website. Anyone from this IP will receive a 403 Forbidden page.</p>
+                    
+                    <div class="ip-input-row">
+                        <input type="text" id="manualIpInput" placeholder="Enter IP address (e.g. 192.168.1.105)" style="flex: 1; background: var(--input-bg); border: 1px solid var(--card-border); border-radius: var(--radius-sm); color: #fff; padding: 10px 14px; font-family: var(--font-mono); font-size: 13px;">
+                        <button onclick="blockManualIp()" class="btn btn-danger btn-xs" style="padding: 10px 18px;">
+                            Block IP
+                        </button>
+                    </div>
+
+                    <div style="margin-top: 18px;">
+                        <span style="font-size: 13px; font-weight: 600; color: #cbd5e1;">Currently Blocked IPs:</span>
+                        <div id="blockedIpsContainer" class="ip-list-chips">
+                            <span class="text-muted" style="font-size: 12px;">No IPs blocked.</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tab 2: Session Cookies & Browser Gateway -->
+        <div id="sessionsTab" class="tab-content">
+            <main class="dashboard-grid">
+                <!-- Left: Launch Options -->
+                <section class="card action-card">
+                    <div class="card-header">
+                        <h2>🚀 Launch Gateway</h2>
+                        <span class="card-desc">Test or open the session in a native browser</span>
+                    </div>
+
+                    <div class="launch-options">
+                        <div class="option-box primary-option">
+                            <div class="option-icon">🖥️</div>
+                            <div class="option-content">
+                                <h3>Real Browser Launcher</h3>
+                                <p>Launches an actual Edge or Chrome window with student cookies pre-injected.</p>
+                                
+                                <div class="browser-selector-row">
+                                    <label for="browserChoice">Browser:</label>
+                                    <select id="browserChoice" class="custom-select">
+                                        <option value="edge" selected>Microsoft Edge (Built-in)</option>
+                                        <option value="chrome">Google Chrome</option>
+                                        <option value="playwright">Playwright Chromium</option>
+                                    </select>
+                                    <button id="btnLaunchBrowser" class="btn btn-primary">
+                                        <span class="btn-text">Open Browser Now</span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="option-box secondary-option">
+                            <div class="option-icon">🌐</div>
+                            <div class="option-content">
+                                <h3>Public Web Version</h3>
+                                <p>The main website at <code>http://127.0.0.1:5000/</code> has full session access with zero admin widgets visible.</p>
+                                <a href="/" target="_blank" class="btn btn-secondary">
+                                    Open Web Version ↗
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Session Health Check -->
+                    <div class="session-checker-box">
+                        <div class="checker-info">
+                            <strong>Live Session Health Check</strong>
+                            <span id="sessionStatusText" class="text-muted">Click to test if cookies are currently valid on server</span>
+                        </div>
+                        <button id="btnCheckSession" class="btn btn-outline">
+                            <span class="btn-icon">🔄</span> Test Session Now
+                        </button>
+                    </div>
+                </section>
+
+                <!-- Right: Active Cookies & Settings -->
+                <section class="card config-card">
+                    <div class="card-header">
+                        <h2>🔑 Active Session Cookies</h2>
+                        <span class="card-desc">Current credentials injected into requests</span>
+                    </div>
+
+                    <form id="cookieForm" class="cookie-form">
+                        <div class="form-group">
+                            <label for="cookieStudentId">hseastudentId</label>
+                            <div class="input-wrapper">
+                                <input type="text" id="cookieStudentId" value="{{ config.cookies.hseastudentId }}" required>
+                                <span class="input-tag">ID</span>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="cookieStudentToken">hseastudentToken</label>
+                            <div class="input-wrapper">
+                                <input type="text" id="cookieStudentToken" value="{{ config.cookies.hseastudentToken }}" required>
+                                <span class="input-tag">Token</span>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="cookiePhpSessId">PHPSESSID</label>
+                            <div class="input-wrapper">
+                                <input type="text" id="cookiePhpSessId" value="{{ config.cookies.PHPSESSID }}" required>
+                                <span class="input-tag">Session</span>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="adminPassword">Admin Password</label>
+                            <div class="input-wrapper">
+                                <input type="password" id="adminPassword" value="{{ config.admin_password or 'admin' }}" required>
+                                <span class="input-tag">Secret</span>
+                            </div>
+                        </div>
+
+                        <div class="form-actions">
+                            <button type="submit" class="btn btn-accent">
+                                Save Configuration Updates
+                            </button>
+                        </div>
+                    </form>
+
+                    <div class="security-note">
+                        <span class="note-icon">💡</span>
+                        <span>If the website logs you out, update the new <code>PHPSESSID</code> here and click Save to restore access immediately.</span>
+                    </div>
+                </section>
+            </main>
+        </div>
+
+        <!-- Footer -->
+        <footer class="app-footer">
+            <p>HS Economics Gateway & Admin Panel &bull; Localhost</p>
+        </footer>
+    </div>
+
+    <!-- Toast Notification Container -->
+    <div id="toastContainer" class="toast-container"></div>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
