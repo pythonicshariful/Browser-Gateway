@@ -22,6 +22,12 @@ http_session = requests.Session()
 def is_admin():
     return flask_session.get("is_admin", False)
 
+def get_host_url():
+    """Detects current host URL correctly even behind reverse proxy / SSL."""
+    scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
+    host = request.headers.get("X-Forwarded-Host", request.host)
+    return f"{scheme}://{host}"
+
 def get_target_headers(subpath=""):
     config = load_config()
     cookies = config.get("cookies", {})
@@ -203,6 +209,150 @@ def api_launch_browser():
         return jsonify({"status": "error", "message": msg}), 500
 
 # -------------------------------------------------------------
+# Video Streaming Proxy for Bunny Stream (mediadelivery.net / b-cdn.net)
+# Bypasses 403 Forbidden domain restrictions by injecting whitelisted Referer
+# -------------------------------------------------------------
+
+# Direct route for /assets/... requested by player.es.js & player.es.css
+@app.route("/assets/<path:subpath>", methods=["GET", "OPTIONS"])
+def proxy_assets(subpath):
+    return proxy_bunny("player", f"assets/{subpath}")
+
+@app.route("/bunny/<service>/", defaults={"subpath": ""}, methods=["GET", "POST", "OPTIONS"])
+@app.route("/bunny/<service>/<path:subpath>", methods=["GET", "POST", "OPTIONS"])
+def proxy_bunny(service, subpath):
+    if request.method == "OPTIONS":
+        resp = Response("", status=200)
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, HEAD, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "*"
+        return resp
+
+    # Map service name to actual Bunny CDN origin host
+    if service == "player":
+        target_origin = "https://player.mediadelivery.net"
+    elif service == "iframe":
+        target_origin = "https://iframe.mediadelivery.net"
+    elif service == "video":
+        target_origin = "https://video.mediadelivery.net"
+    elif service.startswith("bcdn_"):
+        zone = service[5:]
+        target_origin = f"https://{zone}.b-cdn.net"
+    else:
+        target_origin = f"https://{service}"
+
+    target_url = f"{target_origin}/{subpath}" if subpath else f"{target_origin}/"
+    if request.query_string:
+        target_url += f"?{request.query_string.decode('utf-8')}"
+
+    # Crucial: Bunny CDN requires Referer of the licensed customer domain
+    headers = {
+        "User-Agent": request.headers.get("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"),
+        "Referer": "https://hseconomicsbd.com/",
+        "Origin": "https://hseconomicsbd.com",
+        "Accept": request.headers.get("Accept", "*/*"),
+        "Accept-Language": request.headers.get("Accept-Language", "en-US,en;q=0.9"),
+    }
+
+    # Pass Range header for video seeking & chunk buffering
+    if "Range" in request.headers:
+        headers["Range"] = request.headers["Range"]
+    if request.content_type:
+        headers["Content-Type"] = request.content_type
+
+    try:
+        data = request.get_data() if request.method in ["POST", "PUT", "PATCH"] else None
+        resp = requests.request(
+            method=request.method,
+            url=target_url,
+            headers=headers,
+            data=data,
+            stream=True,
+            timeout=25,
+            allow_redirects=True
+        )
+
+        content_type = resp.headers.get("Content-Type", "")
+        host_url = get_host_url()
+
+        # 1. HTML Embed Player Page Rewriting
+        if "text/html" in content_type:
+            html = resp.content.decode(resp.encoding or "utf-8", errors="replace")
+
+            # Rewrite root-relative assets so player.es.js and player.es.css load through /bunny/player/
+            html = html.replace('="/assets/', f'="{host_url}/bunny/player/assets/')
+            html = html.replace("='/assets/", f"='{host_url}/bunny/player/assets/")
+            html = html.replace('="/css/', f'="{host_url}/bunny/player/css/')
+            html = html.replace('="/js/', f'="{host_url}/bunny/player/js/')
+
+            # Inject base tag so any remaining relative paths resolve under /bunny/player/
+            base_tag = f'<base href="{host_url}/bunny/player/">'
+            if "<head>" in html:
+                html = html.replace("<head>", f"<head>{base_tag}")
+            elif "<head " in html:
+                html = re.sub(r'(<head[^>]*>)', r'\1' + base_tag, html, count=1, flags=re.IGNORECASE)
+
+            # Rewrite all internal CDN endpoints so subsequent JS/video calls route through our proxy
+            html = re.sub(r'https?://player\.mediadelivery\.net', f'{host_url}/bunny/player', html)
+            html = re.sub(r'https?://iframe\.mediadelivery\.net', f'{host_url}/bunny/iframe', html)
+            html = re.sub(r'https?://video\.mediadelivery\.net', f'{host_url}/bunny/video', html)
+            html = re.sub(r'https?://([a-zA-Z0-9_\-\.]+)\.b-cdn\.net', rf'{host_url}/bunny/bcdn_\1', html)
+
+            html = re.sub(r'//player\.mediadelivery\.net', f'{host_url}/bunny/player', html)
+            html = re.sub(r'//iframe\.mediadelivery\.net', f'{host_url}/bunny/iframe', html)
+            html = re.sub(r'//video\.mediadelivery\.net', f'{host_url}/bunny/video', html)
+            html = re.sub(r'//([a-zA-Z0-9_\-\.]+)\.b-cdn\.net', rf'{host_url}/bunny/bcdn_\1', html)
+
+            flask_resp = Response(html, status=resp.status_code, content_type=content_type)
+            flask_resp.headers["Access-Control-Allow-Origin"] = "*"
+            flask_resp.headers["Access-Control-Allow-Headers"] = "*"
+            return flask_resp
+
+        # 2. JavaScript Rewriting (player.es.js)
+        if "javascript" in content_type:
+            js_text = resp.content.decode(resp.encoding or "utf-8", errors="replace")
+            js_text = re.sub(r'https?://video\.mediadelivery\.net', f'{host_url}/bunny/video', js_text)
+            js_text = re.sub(r'https?://iframe\.mediadelivery\.net', f'{host_url}/bunny/iframe', js_text)
+            js_text = re.sub(r'https?://([a-zA-Z0-9_\-\.]+)\.b-cdn\.net', rf'{host_url}/bunny/bcdn_\1', js_text)
+            js_text = re.sub(r'//video\.mediadelivery\.net', f'{host_url}/bunny/video', js_text)
+            js_text = re.sub(r'//([a-zA-Z0-9_\-\.]+)\.b-cdn\.net', rf'{host_url}/bunny/bcdn_\1', js_text)
+
+            flask_resp = Response(js_text, status=resp.status_code, content_type=content_type)
+            flask_resp.headers["Access-Control-Allow-Origin"] = "*"
+            flask_resp.headers["Access-Control-Allow-Headers"] = "*"
+            return flask_resp
+
+        # 3. HLS Playlist (.m3u8) Rewriting
+        if ".m3u8" in subpath or "mpegurl" in content_type:
+            playlist_text = resp.content.decode("utf-8", errors="replace")
+            playlist_text = re.sub(r'https?://([a-zA-Z0-9_\-\.]+)\.b-cdn\.net', rf'{host_url}/bunny/bcdn_\1', playlist_text)
+            playlist_text = re.sub(r'https?://video\.mediadelivery\.net', f'{host_url}/bunny/video', playlist_text)
+            
+            flask_resp = Response(playlist_text, status=resp.status_code, content_type=content_type)
+            flask_resp.headers["Access-Control-Allow-Origin"] = "*"
+            flask_resp.headers["Access-Control-Allow-Headers"] = "*"
+            return flask_resp
+
+        # 4. Video Segments (.ts, .m4s, .mp4, CSS, images, fonts)
+        forward_headers = {}
+        for h in ["Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Last-Modified"]:
+            if h in resp.headers:
+                forward_headers[h] = resp.headers[h]
+
+        forward_headers["Access-Control-Allow-Origin"] = "*"
+        forward_headers["Access-Control-Allow-Headers"] = "*"
+
+        return Response(
+            resp.iter_content(chunk_size=65536),
+            status=resp.status_code,
+            headers=forward_headers,
+            content_type=content_type
+        )
+
+    except Exception as e:
+        return f"Video Gateway Error: {str(e)}", 502
+
+# -------------------------------------------------------------
 # Clean, Public Web Proxy
 # Intercepts all paths, enforces IP/Device block rules,
 # and proxies with full student session
@@ -211,9 +361,16 @@ def api_launch_browser():
 @app.route("/", defaults={"subpath": ""}, methods=["GET", "POST", "PUT", "DELETE"])
 @app.route("/<path:subpath>", methods=["GET", "POST", "PUT", "DELETE"])
 def proxy_all(subpath):
-    # Do not intercept admin or static routes
-    if subpath.startswith("admin") or subpath.startswith("_admin") or subpath.startswith("_hub") or subpath.startswith("_static") or subpath.startswith("api/"):
+    # Do not intercept admin, static, assets, or video proxy routes
+    if (subpath.startswith("admin") or subpath.startswith("_admin") or 
+        subpath.startswith("_hub") or subpath.startswith("_static") or 
+        subpath.startswith("api/") or subpath.startswith("bunny/") or
+        subpath.startswith("assets/")):
         return "Not found", 404
+
+    # Intercept logout and password change to protect student account from being altered/destroyed
+    if subpath.startswith("logout") or "profile-password" in subpath or "password-change" in subpath:
+        return redirect("/dashboard/profile")
 
     # 1. Device and IP Tracking & Firewall Check
     client_ip = request.headers.get("X-Forwarded-For", request.remote_addr).split(",")[0].strip()
@@ -274,7 +431,7 @@ def proxy_all(subpath):
             timeout=20
         )
 
-        host_url = request.host_url.rstrip("/")
+        host_url = get_host_url()
 
         # Handle redirects (301, 302, 303, 307, 308)
         if resp.status_code in [301, 302, 303, 307, 308]:
@@ -305,14 +462,51 @@ def proxy_all(subpath):
 
         content_type = resp.headers.get("Content-Type", "")
 
-        # HTML content: Clean URL rewrite without injecting any pills/badges
+        # HTML content: Clean URL rewrite
         if "text/html" in content_type:
             html = resp.content.decode(resp.encoding or "utf-8", errors="replace")
 
-            # Rewrite all target domain URLs to local server URL so user stays on session
+            # 1. Rewrite all target domain URLs to current host URL
             html = html.replace("https://hseconomicsbd.com", host_url)
             html = html.replace("http://hseconomicsbd.com", host_url)
             html = html.replace("//hseconomicsbd.com", host_url.replace("http:", "").replace("https:", ""))
+
+            # 2. Rewrite Bunny Stream video iframes to route through our /bunny proxy
+            # This fixes the 403 Forbidden on videos when hosted on external domains/localhost!
+            html = re.sub(r'https?://player\.mediadelivery\.net/embed/', f'{host_url}/bunny/player/embed/', html)
+            html = re.sub(r'//player\.mediadelivery\.net/embed/', f'{host_url}/bunny/player/embed/', html)
+            html = re.sub(r'https?://iframe\.mediadelivery\.net/embed/', f'{host_url}/bunny/iframe/embed/', html)
+            html = re.sub(r'//iframe\.mediadelivery\.net/embed/', f'{host_url}/bunny/iframe/embed/', html)
+
+            # 3. Disable and remove Logout and Password Change buttons from the student profile dropdown
+            html = re.sub(
+                r'<li[^>]*>\s*<a[^>]*href=["\'][^"\']*(?:logout|profile-password)[^"\']*["\'][^>]*>.*?</a>\s*</li>',
+                '',
+                html,
+                flags=re.IGNORECASE | re.DOTALL
+            )
+
+            # 4. Inject CSS shield to hide any logout or password change links/buttons across all pages
+            account_shield = """
+            <style id="__hs_account_shield">
+                a[href*="logout"], 
+                a[href*="Logout"], 
+                a[href*="profile-password"],
+                a[href*="password-change"],
+                .dropdown-item[href*="logout"],
+                .dropdown-item[href*="profile-password"],
+                li:has(a[href*="logout"]),
+                li:has(a[href*="profile-password"]) {
+                    display: none !important;
+                    visibility: hidden !important;
+                    pointer-events: none !important;
+                }
+            </style>
+            """
+            if "</head>" in html:
+                html = html.replace("</head>", f"{account_shield}</head>")
+            elif "<body" in html:
+                html = re.sub(r'(<body[^>]*>)', r'\1' + account_shield, html, count=1, flags=re.IGNORECASE)
 
             flask_resp = Response(html, status=resp.status_code, content_type=content_type)
             # Sync cookies to client
@@ -343,9 +537,10 @@ def proxy_all(subpath):
 
 if __name__ == "__main__":
     print("=============================================================")
-    print("🚀 HS Economics Gateway Active")
+    print("🚀 HS Economics Gateway Active with Video Stream Proxy")
     print("🌐 Public Web Version (No Admin Controls): http://127.0.0.1:5000")
     print("🛡️ Admin Panel & IP/Device Manager: http://127.0.0.1:5000/admin")
+    print("🎥 Video Stream Proxy Enabled: /bunny/player/... -> mediadelivery.net")
     print("🔑 Default Admin Password: admin")
     print("=============================================================")
     app.run(host="0.0.0.0", port=5000, debug=True)

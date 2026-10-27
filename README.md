@@ -10,6 +10,7 @@ A Flask-powered web gateway and browser automation platform designed to access a
    - Access the complete website at **`http://127.0.0.1:5000/`**.
    - Zero pills, banners, or admin badges are displayed anywhere. Regular users see only the authentic website.
    - **No Session Drop**: All tabs, courses, navigation links, forms, and AJAX assets retain your student session cookies automatically.
+   - **Account Protection Shield**: The "Logout" and "Password Change" options are completely removed from the profile menu, and `/logout` / `/dashboard/profile-password` routes are intercepted to prevent visitors from logging out or altering account credentials.
 
 2. **Admin Panel & Device Manager (`/admin`)**
    - Access at **`http://127.0.0.1:5000/admin`**.
@@ -23,6 +24,11 @@ A Flask-powered web gateway and browser automation platform designed to access a
      - Blocked users immediately receive a clean `403 Access Denied` screen.
    - **Session Cookie Editor**: Modify or refresh `PHPSESSID` and student tokens without touching code.
    - **Live Health Check & Native Browser Launcher**: Test target session or launch in Chrome/Edge.
+
+3. **Bunny Stream Video Proxy (Fixes 403 Forbidden on Hosted Domains)**
+   - Academy videos are delivered via **Bunny.net (mediadelivery.net)**, which checks the HTTP `Referer` domain whitelist.
+   - When hosted on custom domains like `hs.pythonicshariful.tech`, the video player area previously showed `403 Forbidden`.
+   - The built-in `/bunny/...` video proxy injects `Referer: https://hseconomicsbd.com/` into all player and video chunk requests, allowing full playback anywhere without 403 errors.
 
 ---
 
