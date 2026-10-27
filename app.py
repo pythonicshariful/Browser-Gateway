@@ -213,14 +213,39 @@ def api_launch_browser():
 # Bypasses 403 Forbidden domain restrictions by injecting whitelisted Referer
 # -------------------------------------------------------------
 
+ACTIVE_BUNNY_ZONE = "bcdn_vz-0f119c07-b5a"
+
 # Direct route for /assets/... requested by player.es.js & player.es.css
 @app.route("/assets/<path:subpath>", methods=["GET", "OPTIONS"])
 def proxy_assets(subpath):
     return proxy_bunny("player", f"assets/{subpath}")
 
+# Direct route for /video/... requested by Bunny player for thumbnails, captchas, VTT, etc.
+@app.route("/video/<path:subpath>", methods=["GET", "POST", "OPTIONS"])
+def proxy_bunny_video(subpath):
+    return proxy_bunny("video", subpath)
+
+# Mock responder for Bunny infra latency/geo pings (edgezone-*.bunnyinfra.net)
+@app.route("/bunny/infra/", defaults={"subpath": ""}, methods=["GET", "OPTIONS"])
+@app.route("/bunny/infra/<path:subpath>", methods=["GET", "OPTIONS"])
+def mock_bunny_infra(subpath):
+    if request.method == "OPTIONS":
+        resp = Response("", status=200)
+    else:
+        dummy_jpg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00`\x00`\x00\x00\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t\x08\n\x0c\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a\x1f\x1e\x1d\x1a\x1c\x1c $.' \",#\x1c\x1c(7),01444\x1f'9=82<.342\xff\xc0\x00\x0b\x08\x00\x01\x00\x01\x01\x01\x11\x00\xff\xc4\x00\x1f\x00\x00\x01\x05\x01\x01\x01\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\x0b\xff\xda\x00\x08\x01\x01\x00\x00?\x00\xbf\x00\xff\xd9"
+        resp = Response(dummy_jpg, status=200, content_type="image/jpeg")
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, HEAD, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "*"
+    return resp
+
 @app.route("/bunny/<service>/", defaults={"subpath": ""}, methods=["GET", "POST", "OPTIONS"])
 @app.route("/bunny/<service>/<path:subpath>", methods=["GET", "POST", "OPTIONS"])
 def proxy_bunny(service, subpath):
+    global ACTIVE_BUNNY_ZONE
+    if service.startswith("bcdn_"):
+        ACTIVE_BUNNY_ZONE = service
+
     if request.method == "OPTIONS":
         resp = Response("", status=200)
         resp.headers["Access-Control-Allow-Origin"] = "*"
@@ -316,6 +341,9 @@ def proxy_bunny(service, subpath):
             js_text = re.sub(r'https?://([a-zA-Z0-9_\-\.]+)\.b-cdn\.net', rf'{host_url}/bunny/bcdn_\1', js_text)
             js_text = re.sub(r'//video\.mediadelivery\.net', f'{host_url}/bunny/video', js_text)
             js_text = re.sub(r'//([a-zA-Z0-9_\-\.]+)\.b-cdn\.net', rf'{host_url}/bunny/bcdn_\1', js_text)
+            # Rewrite bunnyinfra geo/latency probes to our mock responder
+            js_text = re.sub(r'https?://[a-zA-Z0-9_\-\.]+\.bunnyinfra\.net', f'{host_url}/bunny/infra', js_text)
+            js_text = re.sub(r'//[a-zA-Z0-9_\-\.]+\.bunnyinfra\.net', f'{host_url}/bunny/infra', js_text)
 
             flask_resp = Response(js_text, status=resp.status_code, content_type=content_type)
             flask_resp.headers["Access-Control-Allow-Origin"] = "*"
@@ -325,21 +353,39 @@ def proxy_bunny(service, subpath):
         # 3. HLS Playlist (.m3u8) Rewriting
         if ".m3u8" in subpath or "mpegurl" in content_type:
             playlist_text = resp.content.decode("utf-8", errors="replace")
+            # Rewrite absolute CDN URLs
             playlist_text = re.sub(r'https?://([a-zA-Z0-9_\-\.]+)\.b-cdn\.net', rf'{host_url}/bunny/bcdn_\1', playlist_text)
             playlist_text = re.sub(r'https?://video\.mediadelivery\.net', f'{host_url}/bunny/video', playlist_text)
             
+            # Rewrite AES encryption key URI: URI="/fefd803e-.../key/..." -> URI="http://.../bunny/<service>/fefd803e-.../key/..."
+            playlist_text = re.sub(
+                r'URI=["\']/(.*?)["\']',
+                rf'URI="{host_url}/bunny/{service}/\1"',
+                playlist_text
+            )
+            # Rewrite any root-relative segment paths (lines starting with /)
+            rewritten_lines = []
+            for line in playlist_text.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("/") and not stripped.startswith("//"):
+                    rewritten_lines.append(f"{host_url}/bunny/{service}{stripped}")
+                else:
+                    rewritten_lines.append(line)
+            playlist_text = "\n".join(rewritten_lines)
+
             flask_resp = Response(playlist_text, status=resp.status_code, content_type=content_type)
             flask_resp.headers["Access-Control-Allow-Origin"] = "*"
             flask_resp.headers["Access-Control-Allow-Headers"] = "*"
             return flask_resp
 
-        # 4. Video Segments (.ts, .m4s, .mp4, CSS, images, fonts)
+        # 4. Video Segments (.ts, .dts, .m4s, .mp4, keys, CSS, images, fonts)
         forward_headers = {}
         for h in ["Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Last-Modified"]:
             if h in resp.headers:
                 forward_headers[h] = resp.headers[h]
 
         forward_headers["Access-Control-Allow-Origin"] = "*"
+        forward_headers["Access-Control-Allow-Methods"] = "GET, POST, HEAD, OPTIONS"
         forward_headers["Access-Control-Allow-Headers"] = "*"
 
         return Response(
@@ -365,8 +411,13 @@ def proxy_all(subpath):
     if (subpath.startswith("admin") or subpath.startswith("_admin") or 
         subpath.startswith("_hub") or subpath.startswith("_static") or 
         subpath.startswith("api/") or subpath.startswith("bunny/") or
-        subpath.startswith("assets/")):
+        subpath.startswith("assets/") or subpath.startswith("video/")):
         return "Not found", 404
+
+    # Catch any UUID-prefixed video asset or encryption key mistakenly requested from root
+    # e.g. /fefd803e-9221-414f-87fc-0b0b976f5586/key/...
+    if re.match(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/', subpath):
+        return proxy_bunny(ACTIVE_BUNNY_ZONE, subpath)
 
     # Intercept logout and password change to protect student account from being altered/destroyed
     if subpath.startswith("logout") or "profile-password" in subpath or "password-change" in subpath:
